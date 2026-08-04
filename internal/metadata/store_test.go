@@ -557,7 +557,7 @@ func TestPruneBySyncTag_removesNonMatching(t *testing.T) {
 		t.Fatalf("UpsertFile unsynced failed: %v", err)
 	}
 
-	n, err := s.PruneBySyncTag(2)
+	n, err := s.PruneBySyncTag(2, SourceTorrent)
 	if err != nil {
 		t.Fatalf("PruneBySyncTag failed: %v", err)
 	}
@@ -581,11 +581,40 @@ func TestPruneBySyncTag_removesNonMatching(t *testing.T) {
 	}
 }
 
+func TestPruneBySyncTag_scopedToSource(t *testing.T) {
+	s := newTestStore(t)
+	defer s.Close()
+
+	// Seed a stale torrent row and a stale usenet row, both with old tags.
+	if err := s.UpsertFile(FileRecord{ItemID: 1, FileID: 1, Source: SourceTorrent, Name: "t.mkv", Path: "t.mkv", Size: 100, SyncTag: 1}); err != nil {
+		t.Fatalf("UpsertFile torrent: %v", err)
+	}
+	if err := s.UpsertFile(FileRecord{ItemID: 2, FileID: 2, Source: SourceUsenet, Name: "u.mkv", Path: "u.mkv", Size: 100, SyncTag: 1}); err != nil {
+		t.Fatalf("UpsertFile usenet: %v", err)
+	}
+
+	// Pruning torrents with a new tag must NOT touch usenet rows.
+	n, err := s.PruneBySyncTag(2, SourceTorrent)
+	if err != nil {
+		t.Fatalf("PruneBySyncTag: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("expected 1 torrent row pruned, got %d", n)
+	}
+
+	if got, _ := s.GetFileByFileID(SourceTorrent, 1); got != nil {
+		t.Error("stale torrent row should have been pruned")
+	}
+	if got, _ := s.GetFileByFileID(SourceUsenet, 2); got == nil {
+		t.Error("usenet row must survive a torrent-only prune")
+	}
+}
+
 func TestPruneBySyncTag_emptyStore(t *testing.T) {
 	s := newTestStore(t)
 	defer s.Close()
 
-	n, err := s.PruneBySyncTag(1)
+	n, err := s.PruneBySyncTag(1, SourceTorrent)
 	if err != nil {
 		t.Fatalf("PruneBySyncTag failed: %v", err)
 	}
@@ -598,11 +627,11 @@ func TestPruneBySyncTag_invalidTag(t *testing.T) {
 	s := newTestStore(t)
 	defer s.Close()
 
-	_, err := s.PruneBySyncTag(0)
+	_, err := s.PruneBySyncTag(0, SourceTorrent)
 	if err == nil {
 		t.Error("expected error for tag 0")
 	}
-	_, err = s.PruneBySyncTag(-1)
+	_, err = s.PruneBySyncTag(-1, SourceTorrent)
 	if err == nil {
 		t.Error("expected error for tag -1")
 	}
@@ -631,7 +660,7 @@ func TestPruneBySyncTag_batchMultiple(t *testing.T) {
 		t.Fatalf("UpsertFile survivor failed: %v", err)
 	}
 
-	n, err := s.PruneBySyncTag(2)
+	n, err := s.PruneBySyncTag(2, SourceTorrent)
 	if err != nil {
 		t.Fatalf("PruneBySyncTag failed: %v", err)
 	}

@@ -44,6 +44,21 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Sync.IntervalMinutes != 5 {
 		t.Errorf("sync_interval = %d, want %d", cfg.Sync.IntervalMinutes, 5)
 	}
+	if cfg.Sync.ListPageSize != 5000 {
+		t.Errorf("sync.list_page_size default = %d, want %d", cfg.Sync.ListPageSize, 5000)
+	}
+	if cfg.Sync.SyncTimeoutSeconds != 0 {
+		t.Errorf("sync.sync_timeout_seconds default = %d, want %d (no cap)", cfg.Sync.SyncTimeoutSeconds, 0)
+	}
+	if cfg.TorBox.RequestTimeoutSeconds != 90 {
+		t.Errorf("torbox.request_timeout_seconds default = %d, want %d", cfg.TorBox.RequestTimeoutSeconds, 90)
+	}
+	if cfg.Cache.CDNProxyTimeoutSeconds != 30 {
+		t.Errorf("cache.cdn_proxy_timeout_seconds default = %d, want %d", cfg.Cache.CDNProxyTimeoutSeconds, 30)
+	}
+	if cfg.Cache.CDNURL429BackoffSeconds != 30 {
+		t.Errorf("cache.cdn_url_429_backoff_seconds default = %d, want %d", cfg.Cache.CDNURL429BackoffSeconds, 30)
+	}
 	if cfg.Server.EnablePprof {
 		t.Errorf("enable_pprof = %v, want %v", cfg.Server.EnablePprof, false)
 	}
@@ -306,6 +321,58 @@ func TestLoadInvalidSyncListPageSize(t *testing.T) {
 	_, err := Load(tmp)
 	if err == nil {
 		t.Fatal("expected error for oversized sync list_page_size, got nil")
+	}
+}
+
+func TestLoadInvalidRequestTimeout(t *testing.T) {
+	yaml := "torbox:\n  api_key: \"key\"\n  request_timeout_seconds: 2"
+	tmp := t.TempDir() + "/config.yml"
+	if err := os.WriteFile(tmp, []byte(yaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Load(tmp)
+	if err == nil {
+		t.Fatal("expected error for too-small torbox.request_timeout_seconds, got nil")
+	}
+}
+
+func TestLoadInvalidSyncTimeout(t *testing.T) {
+	yaml := "torbox:\n  api_key: \"key\"\nsync:\n  sync_timeout_seconds: 10"
+	tmp := t.TempDir() + "/config.yml"
+	if err := os.WriteFile(tmp, []byte(yaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Load(tmp)
+	if err == nil {
+		t.Fatal("expected error for sync_timeout_seconds below the 30s floor, got nil")
+	}
+}
+
+func TestLoadInvalidCDNProxyTimeout(t *testing.T) {
+	yaml := "torbox:\n  api_key: \"key\"\ncache:\n  cdn_proxy_timeout_seconds: 900"
+	tmp := t.TempDir() + "/config.yml"
+	if err := os.WriteFile(tmp, []byte(yaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Load(tmp)
+	if err == nil {
+		t.Fatal("expected error for oversized cache.cdn_proxy_timeout_seconds, got nil")
+	}
+}
+
+func TestLoadInvalidCDN429Backoff(t *testing.T) {
+	yaml := "torbox:\n  api_key: \"key\"\ncache:\n  cdn_url_429_backoff_seconds: 301"
+	tmp := t.TempDir() + "/config.yml"
+	if err := os.WriteFile(tmp, []byte(yaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Load(tmp)
+	if err == nil {
+		t.Fatal("expected error for oversized cache.cdn_url_429_backoff_seconds, got nil")
 	}
 }
 

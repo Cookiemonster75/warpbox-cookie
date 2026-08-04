@@ -69,8 +69,16 @@ func NewClient(apiKey string) *Client {
 		baseURL: "https://api.torbox.app",
 		apiKey:  apiKey,
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: 90 * time.Second,
 		},
+	}
+}
+
+// SetTimeout overrides the per-request HTTP timeout. Applies the configured
+// torbox.request_timeout_seconds value; ignored if d <= 0.
+func (c *Client) SetTimeout(d time.Duration) {
+	if d > 0 {
+		c.httpClient.Timeout = d
 	}
 }
 
@@ -136,9 +144,11 @@ type Torrent struct {
 
 // ListFilesParams are optional query parameters for list endpoints.
 type ListFilesParams struct {
-	BypassCache bool
-	Offset      int
-	PageSize    int // Per-request page window; 0 uses defaultListPageSize
+	BypassCache   bool
+	Offset        int
+	PageSize      int           // Per-request page window; 0 uses defaultListPageSize
+	RetryAttempts int           // Per-page retries on IsRetryable errors; 0 = none
+	RetryBackoff  time.Duration // Base backoff between page retries (exponential)
 }
 
 // defaultListPageSize is the fallback per-request window when paginating mylist
@@ -183,7 +193,29 @@ func (c *Client) listGeneric(ctx context.Context, endpoint, label string, params
 
 		slog.Debug("torbox "+label, "offset", offset, "limit", pageSize)
 
-		body, err := c.do(req)
+		// Fetch this page, retrying in place on transient (IsRetryable) errors
+		// so a single slow/failed page does not abort the whole paginated list
+		// and force a restart from offset 0. A non-retryable error, or one that
+		// persists past RetryAttempts, aborts the list as before.
+		var body []byte
+		for attempt := 0; attempt <= params.RetryAttempts; attempt++ {
+			if attempt > 0 {
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-time.After(params.RetryBackoff * time.Duration(1<<(attempt-1))):
+				}
+			}
+			body, err = c.do(req)
+			if err == nil || !IsRetryable(err) {
+				break
+			}
+			slog.Debug("torbox "+label+" page failed, retrying",
+				"offset", offset,
+				"attempt", attempt+1,
+				"error", err,
+			)
+		}
 		if err != nil {
 			return nil, err
 		}

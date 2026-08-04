@@ -8,7 +8,9 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func newTestClient(serverURL, apiKey string) *Client {
@@ -437,5 +439,52 @@ func TestListPaginatesPastCap(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Errorf("expected 2 page requests, got %d", calls)
+	}
+}
+
+// TestListGeneric_RetriesPageInPlace locks in the page-level retry: when a page
+// fails transiently, listGeneric retries the SAME offset (in place) instead of
+// aborting the whole list, so a single slow/failed page no longer forces a
+// restart from offset 0.
+func TestListGeneric_RetriesPageInPlace(t *testing.T) {
+	var mu sync.Mutex
+	var offsets []string
+	failLeft := 1 // fail the offset=0 request once, succeed on retry
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		off := r.URL.Query().Get("offset")
+		offsets = append(offsets, off)
+		shouldFail := off == "0" && failLeft > 0
+		if shouldFail {
+			failLeft--
+		}
+		mu.Unlock()
+
+		if shouldFail {
+			w.WriteHeader(http.StatusBadGateway)
+			w.Write([]byte("error code: 502"))
+			return
+		}
+		json.NewEncoder(w).Encode(apiResponse[[]Torrent]{Data: []Torrent{}, Success: boolPtr(true)})
+	}))
+	defer server.Close()
+
+	client := newTestClient(server.URL, "key")
+	_, err := client.ListTorrents(context.Background(), ListFilesParams{
+		RetryAttempts: 2,
+		RetryBackoff:  5 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("ListTorrents failed after page retry: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(offsets) < 2 {
+		t.Fatalf("expected a retry of offset 0, got requests %v", offsets)
+	}
+	if offsets[0] != "0" || offsets[1] != "0" {
+		t.Fatalf("expected the first two requests to both be offset 0 (in-place retry), got %v", offsets)
 	}
 }

@@ -58,10 +58,10 @@ If you change the code, update this spec.
 
 12. **TorBox API client.** `torbox.NewClient(cfg.TorBox.APIKey)`:
     - Hardcoded base URL: `"https://api.torbox.app"`
-    - HTTP client with 30-second timeout
+    - HTTP client timeout (default 90s, configurable via `torbox.request_timeout_seconds`)
     - Wires `HTTP429Callback`: `func() { throttleQueue.Record429() }` — called when the TorBox API returns HTTP 429
 
-13. **Sync worker.** `metadata.NewSyncWorker(store, client, queue, interval, listPageSize, bypassCache, retryAttempts, retryBackoff)`:
+13. **Sync worker.** `metadata.NewSyncWorker(store, client, queue, interval, listPageSize, bypassCache, retryAttempts, retryBackoff, syncTimeout)`:
     - Stores references to the metadata store, TorBox client, throttle queue, interval, and limit
     - Wires library hooks: `syncWorker.OnItemsAdded` and `syncWorker.OnItemsRemoved` are set to call `runItemsHook(libCfg.OnItemsAdded, libCfg.HookTimeoutSec, items)` when configured
     - `go syncWorker.Start(ctx)` — runs the periodic sync loop in a background goroutine
@@ -414,6 +414,17 @@ through TorBox's API with an offset loop (page size controlled by
 items regardless of the requested `limit`, so pagination prevents silent
 data loss on large accounts.
 
+Retrying is per page: a transient (`IsRetryable`) error on one page retries
+that same `offset` in place with exponential backoff (`sync.retry_attempts`
+/ `sync.retry_backoff`) instead of aborting the whole list and restarting
+from offset 0.
+
+**Usenet note:** on 2026-08-04 TorBox's usenet mylist endpoint was transiently
+degraded — responses above ~1500 items per page were truncated/failed (HTTP/2
+`INTERNAL_ERROR`, partial JSON). It recovered; the default stays 5000. If usenet
+sync fails with `INTERNAL_ERROR` again, lower `list_page_size` (e.g. 1000) as a
+workaround. See D-025.
+
 ```go
 func (c *Client) listGeneric(ctx, endpoint, label string, params ListFilesParams) ([]Torrent, error)
 ```
@@ -467,11 +478,11 @@ The core request executor:
 
 `SyncWorker` manages the periodic TorBox → SQLite synchronisation loop:
 
-- **`NewSyncWorker(store, client, queue, interval, listPageSize, retryAttempts, retryBackoff)`** — stores references. `retryAttempts` (default 3) controls how many times each API call is retried on transient failures. `retryBackoff` (default 1s) is the base exponential backoff duration. `listPageSize` (default 5000) controls the per-request page window when paginating mylist API calls. Does not start.
+- **`NewSyncWorker(store, client, queue, interval, listPageSize, bypassCache, retryAttempts, retryBackoff, syncTimeout)`** — stores references. `retryAttempts` (default 3) controls how many times each API page is retried on transient failures. `retryBackoff` (default 1s) is the base exponential backoff duration. `listPageSize` (default 5000) controls the per-request page window when paginating mylist API calls. `syncTimeout` (default 0 = no cap) bounds a manual resync. Does not start.
 - **`Start(ctx)`** — stores `ctx` as `parentCtx`, creates a derived `cancelCtx`, calls `runLoop(ctx)`, closes `loopDone` channel on exit.
 - **`Stop()`** — calls the cancel function on the current loop, waits up to 90 seconds for `loopDone` to close. Safe to call multiple times or before `Start`.
 - **`Restart()`** — calls `Stop()`, creates a new derived context from `parentCtx`, launches `runLoop` in a new goroutine.
-- **`SyncNow()`** — creates a fresh background context with 60-second timeout, calls `syncOnce(ctx)` synchronously.
+- **`SyncNow()`** — derives a context from `parentCtx` (falling back to background) and applies `syncTimeout` if set (default 0 = no cap; the old hardcoded 60s cap is gone). Calls `syncOnce(ctx)` synchronously.
 - **`Status()`** — returns `SyncStatus{LastSuccess time.Time, LastError string}`.
 
 ### Sync Loop (`runLoop`)
@@ -485,12 +496,13 @@ The core request executor:
 
 **1. Snapshot for change detection.** If `OnItemsAdded` or `OnItemsRemoved` hooks are configured, `store.ListItemDirs()` is called before the sync to capture the current item set.
 
-**2. Parallel fetch with retry.** Two API calls are enqueued via the throttle queue simultaneously. Each call uses exponential backoff retry on transient errors:
-   - `ListTorrents(ctx, ...)` — retries up to `sync.retry_attempts` times with backoff `sync.retry_backoff * 1s, * 2s, * 4s, ...`
+**2. Parallel fetch with per-page retry.** Two API calls are enqueued via the throttle queue simultaneously:
+   - `ListTorrents(ctx, ...)` — paginates, retrying each page up to `sync.retry_attempts` times with backoff `sync.retry_backoff * 1s, * 2s, * 4s, ...`
    - `ListUsenet(ctx, ...)` — same retry pattern
    - Only transient errors (defined by `torbox.IsRetryable()`) trigger a retry — non-retryable errors (401, 404, API-level errors) bail immediately
-   - Retry is gated by the caller's context timeout (60s for `SyncNow()`), not a fixed wall-clock limit
+   - The closures capture the sync's context (not the queue's), so a `SyncNow` timeout (`sync_timeout_seconds`) or process shutdown actually cancels in-flight requests
    - Results collected on channels. Errors are logged but do not abort — usenet may succeed if torrents fail.
+   - An in-flight guard (`atomic.Bool`) skips any sync that starts while another is already running.
 
 **3. Sync tag reservation.** `store.GetNextSyncTag()` atomically increments a counter in the `meta` table:
    - `INSERT OR IGNORE INTO meta VALUES ('sync_tag', '0')` — ensures the row exists.
@@ -503,10 +515,10 @@ The core request executor:
 
 **5. Usenet flattening.** Same iterative pattern with `SourceUsenet`.
 
-**6. Prune.** `store.PruneBySyncTag(syncTag)`:
-   - Deletes all records where `sync_tag != currentTag` OR `sync_tag = 0` (legacy/unsynced).
-   - Batched in 250-row chunks (`DELETE ... WHERE id IN (SELECT id FROM files WHERE ... LIMIT 250)`) to avoid holding the SQLite writer lock for too long.
-   - Always runs on partial success too — avoids accumulating orphaned entries.
+**6. Per-source prune.** `store.PruneBySyncTag(tag, source)`:
+   - Deletes records of the given `source` where `sync_tag != currentTag` OR `sync_tag = 0` (legacy/unsynced).
+   - Runs for `SourceTorrent` only when the torrents fetch succeeded, and for `SourceUsenet` only when the usenet fetch succeeded — a failed fetch is not a definitive answer, so a failed source's previously-synced rows are always kept.
+   - Batched in 250-row chunks (`DELETE ... WHERE id IN (SELECT id FROM files WHERE source = ? AND ... LIMIT 250)`) to avoid holding the SQLite writer lock for too long.
 
 **7. Change detection.** After pruning, `ListItemDirs()` is called again to get the new item set. The old and new sets are compared by `(ItemID, Source)` key:
    - Items in new but not old → `OnItemsAdded(dirNames)`
@@ -791,6 +803,7 @@ YAML. Parsed with `gopkg.in/yaml.v3` (preserves comments on round-trip). The con
 | Key | Type | Default | Validated | Description |
 |-----|------|---------|-----------|-------------|
 | `api_key` | string | **Required** | non-empty | TorBox API key for authentication |
+| `request_timeout_seconds` | int | `90` | 5–600 | Per-request HTTP timeout for TorBox API calls |
 
 #### 2. `server`
 | Key | Type | Default | Validation | Description |
@@ -814,6 +827,8 @@ YAML. Parsed with `gopkg.in/yaml.v3` (preserves comments on round-trip). The con
 | `circuit_breaker_max_entries` | int (pointer) | `2000` | 50–20000 | Max circuit breaker entries |
 | `cleanup_interval_seconds` | int (pointer) | `60` | 10–3600 | Cache sweep interval |
 | `max_cdn_connections` | int (pointer) | `4` | 1–64 | Max concurrent CDN proxy connections |
+| `cdn_proxy_timeout_seconds` | int | `30` | 5–600 | Timeout for proxying a CDN byte range |
+| `cdn_url_429_backoff_seconds` | int | `30` | 1–300 | Backoff after a 429 when fetching a CDN URL |
 
 #### 4. `throttle`
 | Key | Type | Default | Validation | Description |
@@ -830,10 +845,11 @@ YAML. Parsed with `gopkg.in/yaml.v3` (preserves comments on round-trip). The con
 | Key | Type | Default | Validation | Description |
 |-----|------|---------|------------|-------------|
 | `interval_minutes` | int | `5` | 1–1440 | Metadata sync interval |
-| `list_page_size` | int | `5000` | 1–10000 | Per-request page window when paginating mylist API calls |
+| `list_page_size` | int | `5000` | 1–10000 | Per-request page window when paginating mylist API calls (lower to ~1000 if usenet truncation recurs, see D-025) |
 | `bypass_cache` | bool | `false` | — | Bypass TorBox API cache when fetching torrent list; forces fresh metadata |
 | `retry_attempts` | int (pointer) | `3` | 0–10 | Max sync API retry attempts on transient errors (0 = no retry) |
 | `retry_backoff` | int (pointer) | `1` | 1–60 | Sync retry exponential backoff base (seconds) |
+| `sync_timeout_seconds` | int | `0` | 0, or 30–3600 | Overall cap for a manual resync (0 = no cap) |
 
 #### 7. `stats`
 | Key | Type | Default | Validation | Description |

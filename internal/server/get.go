@@ -158,7 +158,7 @@ func (s *Server) streamFileContent(w http.ResponseWriter, r *http.Request, file 
 	// a fresh URL via the throttle queue and retry, up to cdn_url_repair_retries.
 	slog.Debug("GET: proxying from CDN", "id", file.ID, "offset", srvRange.Start)
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{Timeout: time.Duration(s.cfg.CDNProxyTimeoutSeconds) * time.Second}
 	maxAttempts := s.cfg.CDNURLRepairRetries + 1
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
@@ -496,10 +496,10 @@ func (s *Server) getCDNURLWithRetry(source metadata.FileSource, itemID, fileID i
 
 		// Exponential backoff: base * 2^attempt
 		wait := baseBackoff * (1 << attempt)
-		// 429 rate-limit errors get a long 30s backoff. Once TorBox rate-limits,
+		// 429 rate-limit errors get a long backoff. Once TorBox rate-limits,
 		// we need to give it breathing room rather than retrying aggressively.
 		if strings.Contains(res.err.Error(), "unexpected status 429") {
-			wait = 30 * time.Second
+			wait = time.Duration(s.cfg.CDNURL429BackoffSeconds) * time.Second
 		}
 		slog.Warn("CDN URL fetch failed, retrying with backoff",
 			"item_id", itemID,
@@ -660,7 +660,7 @@ func (s *Server) handleGetCDNHang(w http.ResponseWriter, r *http.Request, file *
 	// Poll for CDN URL and proxy data, retrying on both requestdl and data errors.
 	pollInterval := cdnPollInterval
 	const maxPollInterval = 5 * time.Minute
-	proxyClient := &http.Client{Timeout: 30 * time.Second}
+	proxyClient := &http.Client{Timeout: time.Duration(s.cfg.CDNProxyTimeoutSeconds) * time.Second}
 
 	for {
 		// 1. Fetch a CDN URL (with exponential backoff on requestdl 429).

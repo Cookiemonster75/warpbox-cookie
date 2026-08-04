@@ -28,7 +28,11 @@ simultaneous streams. The suggestions below are starting points, not rules.
 | `sync.interval_minutes` | 5 | 1–1440 | New content shows up too slowly for your workflow |
 | `sync.retry_attempts` | 3 | 0–10 | TorBox API is flaky during sync — increase for more resilience |
 | `sync.retry_backoff` | 1s | 1–60s | Longer pauses between retries to avoid hammering the API |
-| `sync.list_page_size` | 5000 | 1–10000 | You want to tweak API call frequency vs. pagination safety |
+| `sync.list_page_size` | 5000 | 1–10000 | You want to tweak API call frequency vs. pagination safety — see Mylist pagination below |
+| `sync.sync_timeout_seconds` | 0 (no cap) | 0 or 30–3600 | You hit the old 60s resync cap on a large library — leave 0 for no cap |
+| `torbox.request_timeout_seconds` | 90 | 5–600 | Slow usenet pages hit `context deadline exceeded` — raise it |
+| `cache.cdn_proxy_timeout_seconds` | 30 | 5–600 | Slow CDN ranges cause proxy timeouts during streaming |
+| `cache.cdn_url_429_backoff_seconds` | 30 | 1–300 | You see CDN URL fetch loops after TorBox rate-limits |
 | `stats.retention_hours` | 24 | 1–720 | You want longer history on the sparkline charts |
 | `stats.chart_minutes` | 60 | 1–1440 | You want the landing page chart to show a shorter or longer window |
 | `auth.enabled` | false | true/false | The web UI is accessible to others on your network |
@@ -61,9 +65,11 @@ predictable behaviour.
 ### Sync retry
 
 When the TorBox API returns transient errors (502, timeout, HTML error pages) during
-a sync cycle, the sync worker retries `ListTorrents` and `ListUsenet` up to
-`sync.retry_attempts` times with exponential backoff: `retry_backoff * 1s, * 2s, * 4s`.
-A value of 0 disables retries — the sync fails immediately on the first transient error.
+a sync cycle, the sync worker retries each page up to `sync.retry_attempts` times
+with exponential backoff: `retry_backoff * 1s, * 2s, * 4s`. Retrying happens per
+page, so a transient error on one page does not force the whole list to restart
+from the beginning. A value of 0 disables retries — the sync fails immediately on
+the first transient error.
 
 The retry only applies to errors that `torbox.IsRetryable()` considers transient.
 Permanent errors (401 unauthorized, 404 not found, API-level errors) are not retried.
@@ -83,10 +89,17 @@ in windows of `sync.list_page_size` items (default 5000). TorBox itself caps
 each response at ~10,000 items regardless of the requested `limit`, so pagination
 is required to avoid silently dropping the oldest items on larger libraries.
 
+**Incident note:** on 2026-08-04 TorBox's **usenet** mylist endpoint was
+transiently degraded — responses above ~1500 items per page were truncated/
+failed (HTTP/2 `INTERNAL_ERROR`, partial JSON), silently dropping usenet files
+from the sync. The endpoint recovered and the default stays 5000. If usenet sync
+ever fails with `INTERNAL_ERROR` again, lower `list_page_size` (e.g. 1000) as a
+workaround until it recovers. See `docs/decision-log.md` D-025.
+
 The tradeoff is page size vs. API calls:
-- **5000** — 3 calls for a 10k library, safe headroom below TorBox's cap
-- **8000** — 2 calls, tighter but TorBox's ~10k cap still provides margin
-- **1000** — ~11 calls, most conservative if you're paranoid about the cap lowering
+- **5000** — default; ~3 calls for a 10k library
+- **1000** — ~11 calls, defensive if you'd rather stay well under any truncation
+- **1500** — the approximate ceiling where the 2026-08-04 usenet truncation began
 
 You probably don't need to change this unless you're on a very slow connection
 and want to minimise API calls, or you have a very small library and want a
@@ -138,7 +151,7 @@ credentials.
 
 | Key | Suggested | Why |
 |-----|-----------|-----|
-| `sync.list_page_size` | 8000 | Fewer API calls per sync cycle |
+| `sync.list_page_size` | 5000 | Default; lower it if usenet truncation recurs (see Mylist pagination) |
 | `sync.interval_minutes` | 10 | Give the longer sync time to complete before the next cycle |
 
 ### Heavy streaming (3+ simultaneous 4K streams)

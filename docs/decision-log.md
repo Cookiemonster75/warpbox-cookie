@@ -264,3 +264,66 @@ This page documents all significant architectural and technical decisions made d
 - **Alternatives considered:** Raw bytes (error-prone); decimal units (would
   misalign with file sizes reported by other tools).
 - **Implementation:** `internal/library/size.go` (`ParseFileSize`), `internal/library/filter.go` (`MinSize`, `MaxSize`, `MatchSize`), `internal/config/config.go` (fields + validation), `internal/server/server.go` (`buildFilters` wiring).
+
+## D-025: Harden metadata sync against transient TorBox usenet list degradation
+
+- **Date:** 2026-08-04
+- **Context:** The usenet portion of the library stopped syncing — every cycle
+  logged `metadata sync: usenet failed error=torbox: reading response: stream
+  error: stream ID N; INTERNAL_ERROR; received from peer` after ~15s. Torrents
+  (941 items) always worked; only usenet failed. A live diagnosis against
+  `GET /v1/api/usenet/mylist` showed the endpoint was erratic: pages ≤ ~1500
+  items returned complete JSON (taking 30–47s, occasionally much faster), while
+  `limit` ≥ 2000 consistently truncated/failed around 15s (HTTP/2
+  `INTERNAL_ERROR`, partial JSON). This is the signature of an overloaded,
+  degraded server rather than a permanent limit: the OpenAPI spec (default
+  `limit=1000`, no documented maximum) describes the usenet and torrents
+  endpoints identically, and a day later the same `limit=5000` request returned
+  all 4,380 usenet items in one valid response. In short, the endpoint was
+  **transiently degraded**, and warpbox's settings amplified the impact.
+- **Decisions:**
+  1. **Keep `sync.list_page_size` at its 5000 default.** The truncation was a
+     transient degradation, not a permanent cap, so the default stays 5000
+     (fewer API calls). If usenet sync fails with `INTERNAL_ERROR` again during
+     a degradation window, lower the page size (e.g. 1000) as a workaround until
+     it recovers — documented in `config.yml.example`.
+  2. **Prune per source — never on a failed fetch.** `PruneBySyncTag` now takes
+     a `FileSource`; `syncOnce` prunes a source only when that source's fetch
+     succeeded. A failed fetch is not a definitive answer ("the items are gone")
+     — it is a transport/API failure, so that source's previously-synced rows
+     are kept. Previously the gate `torRes.err == nil || usenetRes.err == nil`
+     ran the prune when *either* source succeeded, silently wiping the failed
+     source's rows from the store (and firing spurious `OnItemsRemoved` hooks).
+  3. **Retry at page granularity.** Retry logic moved from wrapping the whole
+     `ListTorrents`/`ListUsenet` call into the pagination loop itself, so a
+     transient failure on one page retries that same `offset` in place instead
+     of aborting the entire list and restarting from offset 0.
+  4. **In-flight sync guard.** A periodic tick or manual resync that arrives
+     while a sync is running is skipped with a log line (`atomic.Bool` in
+     `syncOnce`). Periodic syncs were already serialized by the ticker loop,
+     but a manual resync (HTTP handler goroutine) could race a periodic sync
+     and double-prune; the guard closes that window for all paths.
+  5. **Propagate the sync context to HTTP requests.** The throttle queue passes
+     its *own* context to `Execute`, so a manual resync timeout or shutdown
+     cancellation never reached in-flight requests. The sync closures now
+     capture the sync's context.
+  6. **Make the timeout values configurable.** `torbox.request_timeout_seconds`
+     (default 90, replacing a hardcoded 30 that was too tight for slow usenet
+     pages), `sync.sync_timeout_seconds` (default 0 = no cap, replacing a
+     hardcoded 60 that couldn't finish a large paginated usenet sync),
+     `cache.cdn_proxy_timeout_seconds` (default 30), and
+     `cache.cdn_url_429_backoff_seconds` (default 30) — the last two replacing
+     hardcoded 30s values in the CDN proxy path.
+  7. **Leave `IsRetryable` unchanged.** Retrying API *delay* errors (the
+     HTTP/2 stream abort class) was deliberately not added: retrying those
+     could stretch a sync substantially, and `IsRetryable` is intended for 429
+     and transient status errors. Parked for later consideration.
+- **Rationale:** The durable value of this change is not the page size — it is
+  that a degraded usenet endpoint can no longer wipe previously-synced rows
+  (per-source prune), force wasted full-list restarts (page-level retry), or
+  race a manual resync (in-flight guard), and that the timeouts are
+  configurable. When TorBox's usenet endpoint misbehaves, warpbox now fails
+  gracefully — keeping the last-known-good data and retrying in place — instead
+  of destroying the usenet library.
+- **Config:** `sync.list_page_size` (default 5000), `torbox.request_timeout_seconds`, `sync.sync_timeout_seconds`, `cache.cdn_proxy_timeout_seconds`, `cache.cdn_url_429_backoff_seconds`.
+- **Implementation:** `internal/config/config.go`, `internal/torbox/client.go` (page retry, `SetTimeout`), `internal/metadata/sync.go` (guard, per-source prune, ctx propagation, `SyncNow`), `internal/metadata/store.go` (`PruneBySyncTag(tag, source)`), `internal/server/get.go` + `internal/server/server.go` (CDN timeouts), `cmd/warpbox/main.go`, plus tests and docs.

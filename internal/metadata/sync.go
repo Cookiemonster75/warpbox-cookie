@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -28,6 +29,8 @@ type SyncWorker struct {
 	bypassCache    bool
 	retryAttempts  int
 	retryBackoff   time.Duration
+	syncTimeout    time.Duration // overall cap for a manual resync; 0 = no cap
+	syncing        atomic.Bool   // in-flight guard: only one syncOnce at a time
 	lastError      error
 	lastSuccess    time.Time
 
@@ -62,7 +65,8 @@ func (w *SyncWorker) Status() SyncStatus {
 // listPageSize is the per-request page window when paginating mylist API calls.
 // retryAttempts is the max number of retries for transient API errors.
 // retryBackoff is the base backoff duration (exponential: 1x, 2x, 4x).
-func NewSyncWorker(store *Store, client *torbox.Client, queue *throttle.Queue, interval time.Duration, listPageSize int, bypassCache bool, retryAttempts int, retryBackoff time.Duration) *SyncWorker {
+// syncTimeout is the overall cap for a manual resync; 0 means no cap.
+func NewSyncWorker(store *Store, client *torbox.Client, queue *throttle.Queue, interval time.Duration, listPageSize int, bypassCache bool, retryAttempts int, retryBackoff time.Duration, syncTimeout time.Duration) *SyncWorker {
 	return &SyncWorker{
 		store:          store,
 		client:         client,
@@ -72,6 +76,7 @@ func NewSyncWorker(store *Store, client *torbox.Client, queue *throttle.Queue, i
 		bypassCache:    bypassCache,
 		retryAttempts:  retryAttempts,
 		retryBackoff:   retryBackoff,
+		syncTimeout:    syncTimeout,
 	}
 }
 
@@ -157,10 +162,21 @@ func (w *SyncWorker) Restart() {
 	slog.Info("sync worker restarted")
 }
 
-// SyncNow triggers an immediate out-of-cycle sync using a fresh background context.
+// SyncNow triggers an immediate out-of-cycle sync.
+// Bounded by syncTimeout if configured (>0); otherwise there is no overall
+// deadline (each HTTP request is still bounded by the client timeout).
 func (w *SyncWorker) SyncNow() {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
+	ctx := context.Background()
+	w.mu.Lock()
+	if w.parentCtx != nil {
+		ctx = w.parentCtx
+	}
+	w.mu.Unlock()
+	if w.syncTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, w.syncTimeout)
+		defer cancel()
+	}
 	w.syncOnce(ctx)
 }
 
@@ -234,6 +250,17 @@ func errorString(err error) string {
 
 // syncOnce performs a single sync cycle through the throttle queue.
 func (w *SyncWorker) syncOnce(ctx context.Context) {
+	// In-flight guard: never run two sync cycles concurrently. A periodic
+	// tick or a manual resync that arrives while a sync is already running is
+	// skipped. (The periodic loop coalesces ticks anyway; this primarily
+	// prevents a manual resync from racing the periodic sync, which could
+	// double-prune the store.)
+	if !w.syncing.CompareAndSwap(false, true) {
+		slog.Info("metadata sync: already in progress, skipping")
+		return
+	}
+	defer w.syncing.Store(false)
+
 	slog.Debug("metadata sync: starting")
 
 	// Snapshot current items for change detection.
@@ -266,67 +293,38 @@ func (w *SyncWorker) syncOnce(ctx context.Context) {
 	torrentCh := make(chan torrentResult, 1)
 	usenetCh := make(chan usenetResult, 1)
 
-	// Fetch torrents with retry for transient errors (502, timeout, HTML error pages).
+	// Fetch torrents. Retrying happens per page inside the client
+	// (ListFilesParams.RetryAttempts/RetryBackoff), so a transient error on one
+	// page no longer forces the whole list to restart from offset 0.
+	//
+	// The closure captures the sync's ctx (not the queue's) so that a manual
+	// resync timeout or process shutdown actually cancels in-flight requests.
 	w.queue.Enqueue(throttle.Request{
 		Label: "metadata sync: ListTorrents",
-		Execute: func(ctx context.Context) error {
-			var torrents []torbox.Torrent
-			var err error
-			for attempt := 0; attempt <= w.retryAttempts; attempt++ {
-				if attempt > 0 {
-					select {
-					case <-ctx.Done():
-						torrentCh <- torrentResult{nil, ctx.Err()}
-						return ctx.Err()
-					case <-time.After(w.retryBackoff * time.Duration(1<<(attempt-1))):
-					}
-				}
-			torrents, err = w.client.ListTorrents(ctx, torbox.ListFilesParams{
-				BypassCache: w.bypassCache,
-				Offset:      0,
-				PageSize:    w.listPageSize,
+		Execute: func(_ context.Context) error {
+			torrents, err := w.client.ListTorrents(ctx, torbox.ListFilesParams{
+				BypassCache:   w.bypassCache,
+				Offset:        0,
+				PageSize:      w.listPageSize,
+				RetryAttempts: w.retryAttempts,
+				RetryBackoff:  w.retryBackoff,
 			})
-				if err == nil || !torbox.IsRetryable(err) {
-					break
-				}
-				slog.Debug("metadata sync: ListTorrents failed, retrying",
-					"attempt", attempt+1,
-					"error", err,
-				)
-			}
 			torrentCh <- torrentResult{torrents, err}
 			return err
 		},
 	})
 
-	// Fetch Usenet downloads with retry for transient errors.
+	// Fetch Usenet downloads. Same per-page retry behaviour as torrents.
 	w.queue.Enqueue(throttle.Request{
 		Label: "metadata sync: ListUsenet",
-		Execute: func(ctx context.Context) error {
-			var usenet []torbox.Torrent
-			var err error
-			for attempt := 0; attempt <= w.retryAttempts; attempt++ {
-				if attempt > 0 {
-					select {
-					case <-ctx.Done():
-						usenetCh <- usenetResult{nil, ctx.Err()}
-						return ctx.Err()
-					case <-time.After(w.retryBackoff * time.Duration(1<<(attempt-1))):
-					}
-				}
-			usenet, err = w.client.ListUsenet(ctx, torbox.ListFilesParams{
-				BypassCache: w.bypassCache,
-				Offset:      0,
-				PageSize:    w.listPageSize,
+		Execute: func(_ context.Context) error {
+			usenet, err := w.client.ListUsenet(ctx, torbox.ListFilesParams{
+				BypassCache:   w.bypassCache,
+				Offset:        0,
+				PageSize:      w.listPageSize,
+				RetryAttempts: w.retryAttempts,
+				RetryBackoff:  w.retryBackoff,
 			})
-				if err == nil || !torbox.IsRetryable(err) {
-					break
-				}
-				slog.Debug("metadata sync: ListUsenet failed, retrying",
-					"attempt", attempt+1,
-					"error", err,
-				)
-			}
 			usenetCh <- usenetResult{usenet, err}
 			return err
 		},
@@ -414,16 +412,28 @@ func (w *SyncWorker) syncOnce(ctx context.Context) {
 	}
 	w.mu.Unlock()
 
-	// Prune stale records using the sync tag. Records with sync_tag != the
-	// current tag were not touched by this sync and are safe to remove.
-	// We always prune, even on partial fetch failure, to avoid accumulating
-	// orphaned entries for torrents that have been removed from the account.
-	if syncTag > 0 && (torRes.err == nil || usenetRes.err == nil) {
-		deleted, pruneErr := w.store.PruneBySyncTag(syncTag)
+	// Prune stale records per source, using the sync tag. Records whose
+	// sync_tag != the current tag were not touched by this sync.
+	//
+	// A source is pruned ONLY when that source's fetch succeeded: a failed
+	// fetch is not a definitive answer (the items are still on TorBox, we just
+	// couldn't read the list), so its rows must be kept — never delete a
+	// source's data on a failed request. Only a successful response counts as
+	// "these items are gone".
+	if syncTag > 0 && torRes.err == nil {
+		deleted, pruneErr := w.store.PruneBySyncTag(syncTag, SourceTorrent)
 		if pruneErr != nil {
-			slog.Error("metadata sync: prune failed", "error", pruneErr)
+			slog.Error("metadata sync: torrent prune failed", "error", pruneErr)
 		} else if deleted > 0 {
-			slog.Info("metadata sync: pruned stale records", "count", deleted)
+			slog.Info("metadata sync: pruned stale torrent records", "count", deleted)
+		}
+	}
+	if syncTag > 0 && usenetRes.err == nil {
+		deleted, pruneErr := w.store.PruneBySyncTag(syncTag, SourceUsenet)
+		if pruneErr != nil {
+			slog.Error("metadata sync: usenet prune failed", "error", pruneErr)
+		} else if deleted > 0 {
+			slog.Info("metadata sync: pruned stale usenet records", "count", deleted)
 		}
 	}
 

@@ -7,6 +7,12 @@ torbox:
   # TorBox API key (required). Generate one from your TorBox account dashboard.
   api_key: "changeme"
 
+  # Per-request HTTP timeout (in seconds) for calls to the TorBox API.
+  # TorBox's usenet mylist endpoint can be slow to generate large pages, so a
+  # low value causes "context deadline exceeded" failures mid-response.
+  # Must be 5–600. Default: 90
+  # request_timeout_seconds: 90
+
 server:
   # Network address the WebDAV server listens on.
   # Default: ":1412"
@@ -76,6 +82,15 @@ cache:
   # Default: 4
   # max_cdn_connections: 4
 
+  # Timeout (in seconds) for proxying a single byte-range from the CDN during
+  # streaming. Must be 5–600. Default: 30
+  # cdn_proxy_timeout_seconds: 30
+
+  # Backoff (in seconds) applied after a 429 (rate limit) when fetching a CDN
+  # download URL. TorBox needs breathing room once it rate-limits. Must be
+  # 1–300. Default: 30
+  # cdn_url_429_backoff_seconds: 30
+
 throttle:
   # Maximum sustained TorBox API requests per minute.
   # The free TorBox plan allows 300 RPM. Setting this higher will result
@@ -100,8 +115,15 @@ sync:
   # Items per page when paginating the mylist API.
   # TorBox caps each response at ~10,000 items, so Warpbox pages through
   # with this window size. Lower = more API calls but safer; higher = fewer
-  # calls but risks hitting the cap. Must be 1–10000. Default: 5000
-  # list_page_size: 5000
+  # calls but risks hitting the cap. Must be 1–10000. Code default: 5000.
+  #
+  # On 2026-08-04 TorBox's usenet mylist endpoint was transiently degraded:
+  # responses above ~1500 items per page were truncated/failed (HTTP/2 stream
+  # INTERNAL_ERROR, partial JSON), which silently dropped usenet files. The
+  # endpoint recovered and the default stays 5000. If usenet sync ever fails
+  # with INTERNAL_ERROR again, lower this value (e.g. 1000) as a workaround.
+  # See docs/decision-log.md D-025.
+  list_page_size: 5000
 
   # Bypass TorBox's server-side cache when fetching the torrent list.
   # Default: false
@@ -116,6 +138,13 @@ sync:
   # Exponential: backoff * 1s, * 2s, * 4s for attempts 1, 2, 3.
   # Must be 1–60. Default: 1
   # retry_backoff: 1
+
+  # Overall cap (in seconds) for a manual resync triggered from the landing
+  # page. 0 means no cap — the sync runs to completion (each HTTP request is
+  # still bounded by torbox.request_timeout_seconds). Large libraries can take
+  # several minutes to paginate, so the old fixed 60s cap was too short.
+  # Must be 0, or 30–3600. Default: 0 (no cap)
+  # sync_timeout_seconds: 0
 
 library:
   # Virtual library paths: filtered views over the raw TorBox file tree.

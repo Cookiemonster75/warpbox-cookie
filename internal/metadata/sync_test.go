@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -113,12 +115,12 @@ func TestBuildFileRecordSanitizesPath(t *testing.T) {
 }
 
 func TestSyncWorker_Stop_BeforeStart(t *testing.T) {
-	w := NewSyncWorker(nil, nil, nil, time.Minute, 5000, false, 3, time.Second)
+	w := NewSyncWorker(nil, nil, nil, time.Minute, 5000, false, 3, time.Second, 0)
 	w.Stop()
 }
 
 func TestSyncWorker_Restart_BeforeStart(t *testing.T) {
-	w := NewSyncWorker(nil, nil, nil, time.Minute, 5000, false, 3, time.Second)
+	w := NewSyncWorker(nil, nil, nil, time.Minute, 5000, false, 3, time.Second, 0)
 	w.Restart()
 }
 
@@ -144,7 +146,7 @@ func newTestSyncEnv(t *testing.T) (*SyncWorker, *httptest.Server, *Store, func()
 	qCtx, qCancel := context.WithCancel(context.Background())
 	queue.Start(qCtx)
 
-	sw := NewSyncWorker(store, client, queue, time.Hour, 5000, false, 3, time.Second)
+	sw := NewSyncWorker(store, client, queue, time.Hour, 5000, false, 3, time.Second, 0)
 
 	cleanup := func() {
 		qCancel()
@@ -215,7 +217,7 @@ func newTestSyncEnvWithHandler(t *testing.T, handler http.HandlerFunc, retryAtte
 	qCtx, qCancel := context.WithCancel(context.Background())
 	queue.Start(qCtx)
 
-	sw := NewSyncWorker(store, client, queue, time.Hour, 5000, false, retryAttempts, retryBackoff)
+	sw := NewSyncWorker(store, client, queue, time.Hour, 5000, false, retryAttempts, retryBackoff, 0)
 
 	cleanup := func() {
 		qCancel()
@@ -271,6 +273,167 @@ func TestSyncWorker_RetryOnTransientErrors(t *testing.T) {
 			t.Fatal("expected sync to fail when retry_attempts is 0")
 		}
 	})
+}
+
+func TestSyncWorker_PruneKeepsRows_WhenUsenetFails(t *testing.T) {
+	// Regression test for the data-loss bug: when the usenet fetch fails but
+	// torrents succeed, the sync must NOT prune pre-existing usenet rows.
+	// The previous gate (`torRes.err == nil || usenetRes.err == nil`) ran
+	// PruneBySyncTag and deleted every usenet row on a single failed fetch.
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Seed a pre-existing usenet row. SyncTag 0 marks it stale/unsynced, so it
+	// would be deleted by any prune — under the old gate that happens the
+	// moment usenet fails.
+	seed := FileRecord{
+		ItemID:  500,
+		FileID:  700,
+		Source:  SourceUsenet,
+		Name:    "usenet_file.mkv",
+		Path:    "usenet_file.mkv",
+		Size:    100,
+		SyncTag: 0,
+	}
+	if err := store.UpsertFile(seed); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/usenet/mylist"):
+			w.WriteHeader(http.StatusBadGateway)
+			w.Write([]byte("error code: 502"))
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"data":[],"success":true}`))
+		}
+	})
+
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	client := torbox.NewClient("test-api-key")
+	client.SetBaseURL(ts.URL)
+	client.SetHTTPClient(&http.Client{})
+
+	queue := throttle.NewQueue(99999)
+	qCtx, qCancel := context.WithCancel(context.Background())
+	defer qCancel()
+	queue.Start(qCtx)
+
+	sw := NewSyncWorker(store, client, queue, time.Hour, 5000, false, 0, time.Second, 0)
+	sw.SyncNow()
+
+	if sw.Status().LastError == "" {
+		t.Fatal("expected sync to report an error because the usenet fetch failed")
+	}
+
+	got, err := store.GetFileByFileID(SourceUsenet, 700)
+	if err != nil {
+		t.Fatalf("querying seeded usenet row: %v", err)
+	}
+	if got == nil {
+		t.Fatal("seeded usenet row was pruned after a failed usenet fetch; expected it to survive")
+	}
+}
+
+func TestSyncWorker_InFlightGuard_SkipsConcurrentSync(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		once.Do(func() { close(started) })
+		<-release // block so the first sync stays in flight
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"data":[],"success":true}`))
+	})
+
+	sw, cleanup := newTestSyncEnvWithHandler(t, handler, 0, time.Second)
+	defer cleanup()
+
+	// First sync runs and blocks inside the handler.
+	firstDone := make(chan struct{})
+	go func() {
+		sw.SyncNow()
+		close(firstDone)
+	}()
+	<-started
+
+	// A second SyncNow must be skipped immediately by the in-flight guard.
+	secondDone := make(chan struct{})
+	go func() {
+		sw.SyncNow()
+		close(secondDone)
+	}()
+	select {
+	case <-secondDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second SyncNow did not return promptly — guard did not skip it")
+	}
+
+	// Release the first sync so the test can finish cleanly.
+	close(release)
+	select {
+	case <-firstDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first sync did not finish after release")
+	}
+}
+
+func TestSyncWorker_SyncNow_HonorsConfiguredTimeout(t *testing.T) {
+	// A handler that blocks. With a configured sync_timeout, SyncNow must abort
+	// when the cap is hit instead of waiting forever (the old hardcoded 60s
+	// cap is gone; the value is now configurable).
+	block := make(chan struct{})
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-block
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"data":[],"success":true}`))
+	})
+
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	client := torbox.NewClient("test-api-key")
+	client.SetBaseURL(ts.URL)
+	client.SetHTTPClient(&http.Client{})
+
+	queue := throttle.NewQueue(99999)
+	qCtx, qCancel := context.WithCancel(context.Background())
+	defer qCancel()
+	queue.Start(qCtx)
+
+	// syncTimeout of 100ms: SyncNow should return (with an error) quickly.
+	sw := NewSyncWorker(store, client, queue, time.Hour, 5000, false, 0, time.Second, 100*time.Millisecond)
+	done := make(chan struct{})
+	go func() {
+		sw.SyncNow()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("SyncNow did not return within the configured cap")
+	}
+	if sw.Status().LastError == "" {
+		t.Error("expected LastError to be set when SyncNow hits its configured timeout")
+	}
+
+	close(block) // release the handler so the test exits cleanly
+	time.Sleep(50 * time.Millisecond)
 }
 
 func TestSyncWorker_Restart_Lifecycle(t *testing.T) {

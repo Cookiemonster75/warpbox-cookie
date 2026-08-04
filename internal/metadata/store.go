@@ -474,14 +474,18 @@ func (s *Store) GetNextSyncTag() (int64, error) {
 	return tag, nil
 }
 
-// PruneBySyncTag deletes all file records whose sync_tag does NOT match the
-// given tag (i.e. they were not touched by this sync cycle). Records with
-// sync_tag = 0 (legacy/unsynced) are also deleted.
+// PruneBySyncTag deletes file records of the given source whose sync_tag does
+// NOT match the given tag (i.e. they were not touched by this sync cycle).
+// Records with sync_tag = 0 (legacy/unsynced) of that source are also deleted.
+//
+// Scoping by source is important: the sync only prunes a source when that
+// source's fetch succeeded, so a failed fetch can never delete the other
+// source's (or its own) previously-synced rows.
 //
 // Deletes are performed in batches of 250 rows to avoid holding the SQLite
 // writer lock for too long, which would starve concurrent writes from
 // SetCDNURL. Returns the total number of records deleted across all batches.
-func (s *Store) PruneBySyncTag(tag int64) (int, error) {
+func (s *Store) PruneBySyncTag(tag int64, source FileSource) (int, error) {
 	if tag <= 0 {
 		return 0, fmt.Errorf("refusing to prune with invalid sync tag %d", tag)
 	}
@@ -492,9 +496,9 @@ func (s *Store) PruneBySyncTag(tag int64) (int, error) {
 	for {
 		result, err := s.db.Exec(`
 			DELETE FROM files WHERE id IN (
-				SELECT id FROM files WHERE sync_tag != ? OR sync_tag = 0 LIMIT ?
+				SELECT id FROM files WHERE source = ? AND (sync_tag != ? OR sync_tag = 0) LIMIT ?
 			)
-		`, tag, batchSize)
+		`, source, tag, batchSize)
 		if err != nil {
 			if isLockedError(err) {
 				s.dbLockErrors.Add(1)
