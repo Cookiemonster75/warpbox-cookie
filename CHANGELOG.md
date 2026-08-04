@@ -5,6 +5,25 @@ All notable changes to Warpbox will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.7.6] - 2026-08-04
+
+### Fixed
+- Metadata sync no longer deletes previously-synced torrent and usenet files when a fetch fails — a failed fetch is never treated as "these items are gone", so a transient TorBox API error can no longer silently wipe the library from the store
+- A slow or transiently-failing page during sync is retried in place instead of aborting the whole list and restarting from the beginning
+- A manual resync can no longer run concurrently with a periodic sync (in-flight guard), which previously could double-prune the store
+- The landing page log-level selector now shows the currently active level after a page refresh
+
+### Added
+- Configurable TorBox API request timeout: `torbox.request_timeout_seconds` (default 90s)
+- Configurable manual-resync overall cap: `sync.sync_timeout_seconds` (default 0 = no cap)
+- Configurable CDN proxy timeout (`cache.cdn_proxy_timeout_seconds`, default 30s) and CDN 429 backoff (`cache.cdn_url_429_backoff_seconds`, default 30s)
+
+## [v0.7.5] - 2026-07-23
+
+### Fixed
+- Library `on_items_added` / `on_items_removed` hook commands now run relative to the config file's directory (e.g. `/data/` in Docker) instead of the process working directory
+- Config is mounted as a named Docker volume instead of a host bind mount
+
 ## [v0.7.4] - 2026-07-20
 
 ### Fixed
@@ -129,7 +148,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Remove live API credentials from repo — switch to `.template` files, refs #143
 - Fix pre-release audit documentation issues across multiple tickets, refs #109 #110 #138 #139
 
-[Unreleased]: /compare/v0.7.4...HEAD
+[Unreleased]: /compare/v0.7.6...HEAD
+[v0.7.6]: /compare/v0.7.5...v0.7.6
+[v0.7.5]: /compare/v0.7.4...v0.7.5
 [v0.7.4]: /compare/v0.7.3...v0.7.4
 [v0.7.3]: /compare/v0.7.2...v0.7.3
 [v0.7.2]: /compare/v0.7.1...v0.7.2
