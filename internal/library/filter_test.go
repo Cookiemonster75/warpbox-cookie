@@ -174,7 +174,7 @@ func TestMatchDirectory_IncludeAndExclude(t *testing.T) {
 func TestMatchPath_NestedTV(t *testing.T) {
 	// TV folders whose top-level name has no season markers are found via
 	// nested season folders / episode-pattern file names.
-	tvRegex := "(?i)\\b(season|episode|series|complete|tv|saison|stage)\\b|\\b[se]\\d{1,2}([ex]\\d{1,2})?\\b"
+	tvRegex := "(?i)\\b(season|episode|series|complete|tv|saison|stage)\\b|\\b[se]\\d{2}([ex]\\d{2})?\\b"
 	f, err := NewFilter("/tv", tvRegex, "", "", false)
 	if err != nil {
 		t.Fatalf("NewFilter failed: %v", err)
@@ -197,6 +197,7 @@ func TestMatchPath_NestedTV(t *testing.T) {
 		"Avatar.2009/Avatar.2009.2009.1080p.mkv",
 		"Die.Hard.1988/Die.Hard.1988.1080p.mkv",
 		"Casino.Royale.2006/Casino.Royale.2006.1080p.mkv",
+		"Amazing Films 11 Mp4 1080p/E3 The Equalizer 3 (2023) 1080p Surround.mp4",
 	}
 	for _, p := range shouldNotMatch {
 		if f.MatchPath(p) {
@@ -206,7 +207,7 @@ func TestMatchPath_NestedTV(t *testing.T) {
 }
 
 func TestApplyFilter_NestedTV(t *testing.T) {
-	tvRegex := "(?i)\\b(season|episode|series|complete|tv|saison|stage)\\b|\\b[se]\\d{1,2}([ex]\\d{1,2})?\\b"
+	tvRegex := "(?i)\\b(season|episode|series|complete|tv|saison|stage)\\b|\\b[se]\\d{2}([ex]\\d{2})?\\b"
 	f, err := NewFilter("/tv", tvRegex, "", `.*\.(mkv|mp4)$`, false)
 	if err != nil {
 		t.Fatalf("NewFilter failed: %v", err)
