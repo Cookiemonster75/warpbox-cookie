@@ -171,7 +171,7 @@ Because chi uses `Handle` (not per-method routing) for the WebDAV paths, all met
 
 ### Virtual Path Filtering
 
-The `library.Filter` types (built in `server.go:buildFilters()` from `library.virtual_paths` config) provide regex-based includes/excludes on directory and file names, optional `min_file_size`/`max_file_size` byte bounds (human-readable strings parsed via `library.ParseFileSize`, 0 = unlimited), plus a `largest_file_only` option. Filter ordering is: directory regex → file regex → size bounds → largest file selection. Each filter is mounted at a named virtual directory (e.g. `/webdav/movies/`). Filters are compiled from config at server startup and stored in `s.virtualFilters` (slice) and `s.virtualPathMap` (map for O(1) lookup). The `__all__` mount bypasses all filtering.
+The `library.Filter` types (built in `server.go:buildFilters()` from `library.virtual_paths` config) provide regex-based includes/excludes on directory and file names, optional `min_file_size`/`max_file_size` byte bounds (human-readable strings parsed via `library.ParseFileSize`, 0 = unlimited), plus a `largest_file_only` option. Filter ordering is: directory regex → file regex → size bounds → largest file selection. The directory include/exclude regexes match the **full virtual path** (folders plus file name) via `Filter.MatchPath`, so TV packs whose top-level folder carries no markers (e.g. `Show 1080p/Series 1/S01E01.mkv`) are still recognised from their nested structure; `Filter.MatchDirectory` matches only the top-level folder name and is kept for callers that need that narrower check. Each filter is mounted at a named virtual directory (e.g. `/webdav/movies/`). Filters are compiled from config at server startup and stored in `s.virtualFilters` (slice) and `s.virtualPathMap` (map for O(1) lookup). The `__all__` mount bypasses all filtering.
 
 ### WebDAV D:href Encoding (`encodeDAVHref`)
 
@@ -877,8 +877,8 @@ Each virtual path entry:
 | Key | Type | Validation | Description |
 |-----|------|------------|-------------|
 | `name` | string | Required, no `/`, unique | Virtual directory name (reserved name `__all__` silently accepted but filtered out at runtime) |
-| `directory_include` | string | Must compile as regex | Include only dirs matching this regex |
-| `directory_exclude` | string | Must compile as regex | Exclude dirs matching this regex |
+| `directory_include` | string | Must compile as regex | Include records whose full virtual path matches (folders + file name) |
+| `directory_exclude` | string | Must compile as regex | Exclude records whose full virtual path matches (folders + file name) |
 | `file_regex` | string | Must compile as regex | Only files matching this regex appear |
 | `min_file_size` | string | Parsed by `library.ParseFileSize`; `min ≤ max` when both set | Optional — human-readable size (e.g. `300MB`, `1.5GB`); empty = no minimum; binary units (1024) |
 | `max_file_size` | string | Parsed by `library.ParseFileSize`; `min ≤ max` when both set | Optional — human-readable size (e.g. `10GB`); empty = no maximum; binary units (1024) |

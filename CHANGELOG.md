@@ -5,6 +5,13 @@ All notable changes to Warpbox will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- `config.yml.example` no longer ships `largest_file_only: true` for the `tv` virtual path (the v0.5.3 fix for #172 never landed in the example), so a fresh setup no longer hides all but the largest episode in season packs
+- Directory include/exclude regexes now match the full virtual path (folders + file name) instead of just the torrent-level folder name, so TV packs like `Show 1080p/Series 1/S01E01.mkv` appear in `/webdav/tv/` even when their top-level folder has no season markers
+- The default `tv` `directory_include` regex now matches single-digit seasons/episodes (`S1`, `E1`) and no longer matches plain years, so year-only movies (`Avatar.2009`) stay out of the tv view (refs #172)
+
 ## [v0.7.6] - 2026-08-04
 
 ### Fixed

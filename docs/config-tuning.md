@@ -175,12 +175,12 @@ Each virtual path is a name plus regex filters, optional size bounds, and a `lar
 
 | Field | What it filters on | Example |
 |-------|--------------------|---------|
-| `directory_include` | Torrent-level directory name. If set, only torrents matching this regex are included. | Include season/episode patterns for TV |
-| `directory_exclude` | Torrent-level directory name. Torrents matching this regex are excluded. | Exclude season/episode patterns from movies |
+| `directory_include` | Full virtual path (folders + file name). If set, only records whose path matches are included. Matching the whole path means TV packs like `Show 1080p/Series 1/S01E01.mkv` are recognised even when the top-level folder name has no markers. | Include season/episode patterns for TV |
+| `directory_exclude` | Full virtual path (folders + file name). Records whose path matches are excluded. | Exclude season/episode patterns from movies |
 | `file_regex` | Relative file path inside the torrent. Only matching files appear. | Only show `.mkv`, `.mp4`, `.avi` files |
 | `min_file_size` | Optional minimum file size. Files smaller than this are hidden from this view. Empty = no minimum. Binary units (1MB = 1024²). | `1.5GB` to hide tiny samples from movies |
 | `max_file_size` | Optional maximum file size. Files larger than this are hidden. Empty = no maximum. | `6GB` to hide oversized season packs from TV |
-| `largest_file_only` | When true, only the largest file in the torrent is shown. Hides extras (sample files, subtitles, etc.) within the filtered view. | Usually want this on for both movies and TV |
+| `largest_file_only` | When true, only the largest file in the torrent is shown. Hides extras (sample files, subtitles, etc.) within the filtered view. | On for movies. Leave **off** for TV so season packs show every episode (refs #172) |
 
 Size bounds run **after** name filters and **before** `largest_file_only`. This means:
 - If `min_file_size` is set but all files in a torrent are smaller, NO files appear for that torrent (even with `largest_file_only`).

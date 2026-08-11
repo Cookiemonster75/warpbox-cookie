@@ -69,6 +69,21 @@ func (f *Filter) MatchDirectory(name string) bool {
 	return true
 }
 
+// MatchPath reports whether the full virtual path (directories plus file name)
+// passes the include/exclude directory filters. Unlike MatchDirectory it
+// inspects the whole path, so TV packs organised as
+// "Show 1080p/Series 1/S01E01.mkv" are recognised even when the top-level
+// folder name carries no season markers.
+func (f *Filter) MatchPath(path string) bool {
+	if f.DirectoryInclude != nil && !f.DirectoryInclude.MatchString(path) {
+		return false
+	}
+	if f.DirectoryExclude != nil && f.DirectoryExclude.MatchString(path) {
+		return false
+	}
+	return true
+}
+
 func (f *Filter) MatchFile(relPath string) bool {
 	if f.FileRegex == nil {
 		return true
@@ -89,15 +104,18 @@ func (f *Filter) MatchSize(size int64) bool {
 }
 
 func (f *Filter) Apply(records []metadata.FileRecord) []metadata.FileRecord {
-	dirMatchCache := make(map[string]bool, len(records)/2)
+	pathMatchCache := make(map[string]bool, len(records)/2)
 	result := make([]metadata.FileRecord, 0, len(records))
 
 	for _, rec := range records {
-		dir := ExtractDirectory(rec.Path)
-		ok, cached := dirMatchCache[dir]
+		ok, cached := pathMatchCache[rec.Path]
 		if !cached {
-			ok = f.MatchDirectory(dir)
-			dirMatchCache[dir] = ok
+			// Directory filters match the full virtual path so TV packs whose
+			// top-level folder has no season markers are still found via nested
+			// folders or episode-pattern file names
+			// (e.g. "Show 1080p/Series 1/S01E01.mkv").
+			ok = f.MatchPath(rec.Path)
+			pathMatchCache[rec.Path] = ok
 		}
 		if !ok {
 			continue

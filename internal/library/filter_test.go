@@ -171,6 +171,62 @@ func TestMatchDirectory_IncludeAndExclude(t *testing.T) {
 	}
 }
 
+func TestMatchPath_NestedTV(t *testing.T) {
+	// TV folders whose top-level name has no season markers are found via
+	// nested season folders / episode-pattern file names.
+	tvRegex := "(?i)\\b(season|episode|series|complete|tv|saison|stage)\\b|\\b[se]\\d{1,2}([ex]\\d{1,2})?\\b"
+	f, err := NewFilter("/tv", tvRegex, "", "", false)
+	if err != nil {
+		t.Fatalf("NewFilter failed: %v", err)
+	}
+
+	shouldMatch := []string{
+		"Keeping Up Appearances 1080p/Series 1/S01E01 - Daddy's Accident.mkv",
+		"Keeping Up Appearances 1080p/Series 2/S02E01.mkv",
+		"Show.2024/Show.2024.S01E01.1080p.mkv",
+		"Show.1080p/Show.1080p.E01.mkv",
+		"Breaking.Bad.S01.1080p/ep1.mkv",
+	}
+	for _, p := range shouldMatch {
+		if !f.MatchPath(p) {
+			t.Errorf("tv include should match %q", p)
+		}
+	}
+
+	shouldNotMatch := []string{
+		"Avatar.2009/Avatar.2009.2009.1080p.mkv",
+		"Die.Hard.1988/Die.Hard.1988.1080p.mkv",
+		"Casino.Royale.2006/Casino.Royale.2006.1080p.mkv",
+	}
+	for _, p := range shouldNotMatch {
+		if f.MatchPath(p) {
+			t.Errorf("tv include should NOT match movie %q", p)
+		}
+	}
+}
+
+func TestApplyFilter_NestedTV(t *testing.T) {
+	tvRegex := "(?i)\\b(season|episode|series|complete|tv|saison|stage)\\b|\\b[se]\\d{1,2}([ex]\\d{1,2})?\\b"
+	f, err := NewFilter("/tv", tvRegex, "", `.*\.(mkv|mp4)$`, false)
+	if err != nil {
+		t.Fatalf("NewFilter failed: %v", err)
+	}
+	records := []metadata.FileRecord{
+		{ItemID: 1, Source: metadata.SourceTorrent, Path: "Keeping Up Appearances 1080p/Series 1/S01E01 - Daddy's Accident.mkv", Size: 1000},
+		{ItemID: 1, Source: metadata.SourceTorrent, Path: "Keeping Up Appearances 1080p/Series 1/S01E02.mkv", Size: 900},
+		{ItemID: 2, Source: metadata.SourceTorrent, Path: "Avatar.2009/Avatar.2009.2009.1080p.mkv", Size: 5000},
+	}
+	got := f.Apply(records)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 records (TV episodes), got %d", len(got))
+	}
+	for _, rec := range got {
+		if rec.ItemID == 2 {
+			t.Error("movie Avatar.2009 should not appear in tv view")
+		}
+	}
+}
+
 func TestMatchFile(t *testing.T) {
 	f, err := NewFilter("/movies", "", "", `.*\.(mkv|mp4|avi)$`, false)
 	if err != nil {

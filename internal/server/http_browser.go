@@ -123,8 +123,7 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		for _, rec := range records {
 			allTotal += rec.Size
 			for i, vf := range s.virtualFilters {
-				dir := library.ExtractDirectory(rec.Path)
-				if !vf.MatchDirectory(dir) {
+				if !vf.MatchPath(rec.Path) {
 					continue
 				}
 				rel := library.ExtractRelativePath(rec.Path)

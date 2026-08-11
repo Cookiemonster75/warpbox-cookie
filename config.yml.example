@@ -162,9 +162,11 @@ library:
       # min_file_size: 1.5GB
       # max_file_size: 12GB
     - name: tv
-      directory_include: "(?i)(season|episode)s?\\.?\\d?|[se]\\d\\d|\\b(tv|complete)|\\b(saison|stage)\\.?\\d|[a-z]\\s?-\\s?\\d{2,4}\\b|\\d{2,4}\\s?-\\s?\\d{2,4}\\b"
+      directory_include: "(?i)\\b(season|episode|series|complete|tv|saison|stage)\\b|\\b[se]\\d{1,2}([ex]\\d{1,2})?\\b"
       file_regex: ".*\\.(mkv|mp4|avi)$"
-      largest_file_only: true
+      # Keep largest_file_only off for TV so season packs show every episode,
+      # not just the largest file (refs #172).
+      largest_file_only: false
       # min_file_size: 300MB
       # max_file_size: 6GB
 
