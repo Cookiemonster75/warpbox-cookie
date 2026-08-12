@@ -228,6 +228,44 @@ func TestApplyFilter_NestedTV(t *testing.T) {
 	}
 }
 
+func TestApplyFilter_MovieWithJunkSeriesFileStaysOutOfTV(t *testing.T) {
+	// A movie torrent that ships a promotional .url file whose name contains
+	// "Series" must not leak the movie into the tv view: the junk file fails
+	// the video file_regex, and the movie's real mkv has no TV markers.
+	tvFilter, err := NewFilter("/tv",
+		"(?i)\\b(season|episode|series|complete|tv|saison|stage)\\b|\\b[se]\\d{2}([ex]\\d{2})?\\b",
+		"", `.*\.(mkv|mp4|avi)$`, false)
+	if err != nil {
+		t.Fatalf("NewFilter tv: %v", err)
+	}
+	movieFilter, err := NewFilter("/movies", "",
+		"(?i)(season|episode)s?\\.?\\d?|[se]\\d\\d|\\b(tv|complete)|\\b(saison|stage)\\.?\\d|[a-z]\\s?-\\s?\\d{2,4}\\b|\\d{2,4}\\s?-\\s?\\d{2,4}\\b",
+		`.*\.(mkv|mp4|avi)$`, false)
+	if err != nil {
+		t.Fatalf("NewFilter movies: %v", err)
+	}
+
+	records := []metadata.FileRecord{
+		{ItemID: 7, Source: metadata.SourceTorrent, Path: "Evil.Dead.En.llamas.2026.WEB-DL.1080p-Dual-Lat/Descargar Películas, Series y Animes...url", Size: 1},
+		{ItemID: 7, Source: metadata.SourceTorrent, Path: "Evil.Dead.En.llamas.2026.WEB-DL.1080p-Dual-Lat/Evil.Dead.En.llamas.2026.WEB-DL.1080p-Dual-Lat.mkv", Size: 5000},
+		{ItemID: 7, Source: metadata.SourceTorrent, Path: "Evil.Dead.En.llamas.2026.WEB-DL.1080p-Dual-Lat/Importante Leeme!.vbs", Size: 2},
+	}
+
+	gotTV := tvFilter.Apply(records)
+	if len(gotTV) != 0 {
+		t.Fatalf("tv view should not contain the movie torrent, got %d records: %+v", len(gotTV), gotTV)
+	}
+
+	gotMovies := movieFilter.Apply(records)
+	if len(gotMovies) != 1 {
+		t.Fatalf("movies view should keep only the video file, got %d records: %+v", len(gotMovies), gotMovies)
+	}
+	want := "Evil.Dead.En.llamas.2026.WEB-DL.1080p-Dual-Lat/Evil.Dead.En.llamas.2026.WEB-DL.1080p-Dual-Lat.mkv"
+	if gotMovies[0].Path != want {
+		t.Errorf("unexpected movies record: %q", gotMovies[0].Path)
+	}
+}
+
 func TestMatchFile(t *testing.T) {
 	f, err := NewFilter("/movies", "", "", `.*\.(mkv|mp4|avi)$`, false)
 	if err != nil {
