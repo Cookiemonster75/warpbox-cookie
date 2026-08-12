@@ -72,3 +72,6 @@ internal/server/warpbox-sm.png
 
 # Local rclone remotes (machine-specific)
 rclone.conf
+
+# Local Plex scan hook (contains Plex token)
+plex-scan.cmd
