@@ -69,3 +69,6 @@ torbox_new.txt
 usenet_sample.json
 internal/server/warpbox-sm.png
 .git-rewrite/
+
+# Local rclone remotes (machine-specific)
+rclone.conf
