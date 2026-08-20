@@ -75,3 +75,6 @@ rclone.conf
 
 # Local Plex scan hook (contains Plex token)
 plex-scan.cmd
+
+# Freebuff client workspace (agent DB, not project source)
+.freebuff/
